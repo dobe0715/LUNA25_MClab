@@ -1,3 +1,0 @@
-For six datasets that don't match with mask_dataset, we exclude them.
-All malignant datasets are included valid_1-1.csv. And benign datasets are also included to that file.
-The others are all included to train_other.csv.
