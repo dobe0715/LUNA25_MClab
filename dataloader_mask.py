@@ -230,7 +230,7 @@ class CTCaseDataset(data.Dataset):
 
         # clip and scale...
         patch = clip_and_scale(patch)
-        # mask = clip_and_scale(mask) # 이미 0 or 1으로 설정되어 있음.
+        # mask = clip_and_scale(mask) # already its values be 0 to 1
         
         patch = torch.from_numpy(patch)
         mask = torch.from_numpy(mask)
