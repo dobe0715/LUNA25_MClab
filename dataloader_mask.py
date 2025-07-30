@@ -247,8 +247,8 @@ class CTCaseDataset(data.Dataset):
         }
 
         return sample 
-    # 2D인 경우 shape : tensor(3, size_px, size_px)
-    # 3D인 경우 shape : tensor(1, size_px, size_px, size_px)
+    # In case of 2D, shape : tensor(3, size_px, size_px)
+    # In case of 3D, shape : tensor(1, size_px, size_px, size_px)
 
     def __len__(self):
         return len(self.dataset)

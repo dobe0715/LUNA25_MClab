@@ -6,7 +6,7 @@ class Configuration(object):
     def __init__(self) -> None:
 
         # Working directory
-        self.WORKDIR = Path("/home/aiuser/soshin/LUNA25/baseline_submit")
+        self.WORKDIR = Path("./submit")
         self.RESOURCES = self.WORKDIR / "resources"
         # Starting weights for the I3D model
         self.MODEL_RGB_I3D = (
@@ -15,29 +15,29 @@ class Configuration(object):
         
         # Data parameters
         # Path to the nodule blocks folder provided for the LUNA25 training data. 
-        self.DATADIR = Path("/home/aiuser/soshin/LUNA25/dataset/luna25_nodule_blocks")
-        self.MASK_DATADIR = Path("/home/aiuser/soshin/LUNA25/dataset/luna25_nodule_blocks_mask")
+        self.DATADIR = Path("./dataset/luna25_nodule_blocks")
+        self.MASK_DATADIR = Path("./dataset/luna25_nodule_blocks_mask")
 
         # Path to the folder containing the CSVs for training and validation.
-        self.CSV_DIR = Path("/home/aiuser/soshin/LUNA25/dataset")
+        self.CSV_DIR = Path("./dataset")
 
         self.CSV_DIR_TRAIN = self.CSV_DIR / "train_other.csv" # Path to the training CSV
         self.CSV_DIR_VALID = self.CSV_DIR / "valid_1-1.csv" # Path to the validation CSV
         # self.CSV_DIR_TRAIN = self.CSV_DIR / "luna25_training.csv" # Path to the training CSV
-        self.VALID_SAMPLES_NUM = int(os.getenv("VALID_SAMPLES_NUM", 200))
+        self.VALID_SAMPLES_NUM = 200
         
         # Results will be saved in the /results/ directory, inside a subfolder named according to the specified EXPERIMENT_NAME and MODE.
         self.EXPERIMENT_DIR = self.WORKDIR / "results"
         if not self.EXPERIMENT_DIR.exists():
             self.EXPERIMENT_DIR.mkdir(parents=True)
             
-        self.EXPERIMENT_NAME = os.getenv("EXPERIMENT_NAME", "amp-batch_32-aux_200-seed_2000")
+        self.EXPERIMENT_NAME = "amp-batch_32_multitask_seed_2000"
         self.MODE = "3D" # 2D or 3D
 
-        self.DEVICE = "cuda:1"
+        self.DEVICE = "cuda:0"
 
         # Training parameters
-        self.SEED = int(os.getenv("SEED", 2000))
+        self.SEED = 2000
         self.NUM_WORKERS = 8
         self.SIZE_MM = 50
         self.SIZE_PX = 64
@@ -71,9 +71,7 @@ class Configuration(object):
         # #### Auxiliary config
         self.AUX_TASK = "Segmentation"
         self.AUX_BATCH_SIZE = 16
-        self.DETECTOR_HIDDEN = 512
         self.DETECTOR_DROP_RATE = 0.0
         self.AUX_LOSS_WEIGHT = 0.5
-        self.AUX_TRAIN_RATIO = 1
         
 config = Configuration()
