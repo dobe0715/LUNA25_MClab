@@ -1,4 +1,8 @@
-# For batch 32
+'''
+For batch 32 with Accelerate
+
+This file can replace the "train.amp"
+'''
 
 from torch_ema import ExponentialMovingAverage
 from models.model_2d import ResNet18
@@ -19,7 +23,9 @@ from tqdm import tqdm
 from copy import deepcopy
 from preprocessing.utils import rot_flip_yz_2
 
-torch.backends.cudnn.benchmark = True
+from accelerate import Accelerator
+from accelerate.utils import set_seed
+
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -51,15 +57,13 @@ class DiceLoss(nn.Module):
         return 1 - dice
 
 def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
-    
-    torch.manual_seed(config.SEED)
-    np.random.seed(config.SEED)
-    random.seed(config.SEED)
-    
-    scaler = torch.cuda.amp.GradScaler()
-    
-    for key, value in vars(config).items():
-        logging.info(f"{key} : {value}")
+    accelerator = Accelerator(mixed_precision='fp16')
+
+    set_seed(config.SEED)
+
+    if accelerator.is_main_process:
+        for key, value in vars(config).items():
+            logging.info(f"{key} : {value}")
 
     # Load original datasets
     train_df = pandas.read_csv(train_csv_path)
@@ -67,14 +71,9 @@ def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
     
     # Combine all data first
     all_df = pandas.concat([train_df, valid_df], ignore_index=True)
-    
-    # Get unique patients from validation set for patient-level sampling
     unique_patients = valid_df['PatientID'].unique()
-    
-    # Randomly sample patients to get approximately 200 samples for validation
     np.random.shuffle(unique_patients)
     
-    # Find the number of patients needed to get close to 200 samples
     cumulative_samples = 0
     selected_patients = []
     valid_samples_num = config.VALID_SAMPLES_NUM
@@ -85,27 +84,22 @@ def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
             selected_patients.append(patient)
             cumulative_samples += patient_samples
         else:
-            # If adding this patient would exceed 200, decide based on how close we are
             if abs(valid_samples_num - cumulative_samples) > abs(valid_samples_num - (cumulative_samples + patient_samples)):
                 selected_patients.append(patient)
                 cumulative_samples += patient_samples
             break
-    
-    # If we still need more samples and there are remaining patients
+            
     if cumulative_samples < valid_samples_num and len(selected_patients) < len(unique_patients):
         remaining_patients = [p for p in unique_patients if p not in selected_patients]
         if remaining_patients:
             selected_patients.append(remaining_patients[0])
-    
-    # Create new validation set with selected patients
+            
     new_valid_df = valid_df[valid_df['PatientID'].isin(selected_patients)].reset_index(drop=True)
-    
-    # Create new training set: all data except the selected validation patients
     new_train_df = all_df[~all_df['PatientID'].isin(selected_patients)].reset_index(drop=True)
     
     logging.info(f"Original train samples: {len(train_df)}")
     
-    if config.SUBMISSION == False:
+    if config.SUBMISSION == False and accelerator.is_main_process:
         logging.info(f"Original valid samples: {len(valid_df)}")
         logging.info(f"Total unique patients in validation set: {len(unique_patients)}")
         logging.info(f"Selected patients for validation: {len(selected_patients)}")
@@ -116,79 +110,50 @@ def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
         logging.info(f"Number of benign training samples: {len(new_train_df) - new_train_df.label.sum()}")
         logging.info(f"Number of malignant validation samples: {new_valid_df.label.sum()}")
         logging.info(f"Number of benign validation samples: {len(new_valid_df) - new_valid_df.label.sum()}")
-
     
     if config.SUBMISSION == False:
-        # Create data loaders with balanced sampling
         weights = make_weights_for_balanced_classes(new_train_df.label.values)
         weights = torch.DoubleTensor(weights)
         sampler = torch.utils.data.sampler.WeightedRandomSampler(weights, len(new_train_df))
         
         train_loader = get_data_loader(
-            config.DATADIR, 
-            config.MASK_DATADIR,
-            new_train_df,  # Use new combined training set
-            mode=config.MODE,
-            sampler=sampler,
-            workers=config.NUM_WORKERS,
-            batch_size=config.BATCH_SIZE,
-            rotations=config.ROTATION,
-            translations=config.TRANSLATION,
-            size_mm=config.SIZE_MM,
-            size_px=config.SIZE_PX,
+            config.DATADIR, config.MASK_DATADIR, new_train_df, 
+            mode=config.MODE, sampler=sampler, workers=config.NUM_WORKERS, 
+            batch_size=config.BATCH_SIZE, rotations=config.ROTATION, 
+            translations=config.TRANSLATION, size_mm=config.SIZE_MM, size_px=config.SIZE_PX,
         )
-        
     else:
         weights = make_weights_for_balanced_classes(train_df.label.values)
         weights = torch.DoubleTensor(weights)
         sampler = torch.utils.data.sampler.WeightedRandomSampler(weights, len(train_df))
         
-    
         train_loader = get_data_loader(
-            config.DATADIR, 
-            config.MASK_DATADIR,
-            train_df,  # Use new combined training set
-            mode=config.MODE,
-            sampler=sampler,
-            workers=config.NUM_WORKERS,
-            batch_size=config.BATCH_SIZE,
-            rotations=config.ROTATION,
-            translations=config.TRANSLATION,
-            size_mm=config.SIZE_MM,
-            size_px=config.SIZE_PX,
+            config.DATADIR, config.MASK_DATADIR, train_df,
+            mode=config.MODE, sampler=sampler, workers=config.NUM_WORKERS,
+            batch_size=config.BATCH_SIZE, rotations=config.ROTATION,
+            translations=config.TRANSLATION, size_mm=config.SIZE_MM, size_px=config.SIZE_PX,
         )
 
     valid_loader = get_data_loader(
-        config.DATADIR,
-        config.MASK_DATADIR,
-        new_valid_df,  # Use new validation set (200 samples)
-        mode=config.MODE,
-        workers=config.NUM_WORKERS,
-        batch_size=config.BATCH_SIZE,
-        rotations=None,
-        translations=None,
-        size_mm=config.SIZE_MM,
-        size_px=config.SIZE_PX,
+        config.DATADIR, config.MASK_DATADIR, new_valid_df,
+        mode=config.MODE, workers=config.NUM_WORKERS, batch_size=config.BATCH_SIZE,
+        rotations=None, translations=None, size_mm=config.SIZE_MM, size_px=config.SIZE_PX,
     )
 
-    device = torch.device(config.DEVICE)
+    # device = torch.device(config.DEVICE)
+    device = accelerator.device 
 
     # Build multi-task model
     if config.MODE == "2D":
-        feature_extractor = ResNet18().to(device)
+        feature_extractor = ResNet18() 
     elif config.MODE == "3D":
         feature_extractor = I3D(
-            num_classes=1,
-            input_channels=3,
-            pre_trained=True, 
-            dropout_prob=config.DROP_RATE, 
-            freeze_bn=True, 
-            extract_feature=True, 
-        ).to(device)
+            num_classes=1, input_channels=3, pre_trained=True, 
+            dropout_prob=config.DROP_RATE, freeze_bn=True, extract_feature=True, 
+        ) 
 
-    aux_model = SegmentationHead(in_channels=1024, out_channels=1, target_size=(64,64,64)).to(device)
-
-    model = MultiTaskModel(feature_extractor, aux_model=aux_model, aux_task=config.AUX_TASK).to(device)
+    aux_model = SegmentationHead(in_channels=1024, out_channels=1, target_size=(64,64,64))
+    model = MultiTaskModel(feature_extractor, aux_model=aux_model, aux_task=config.AUX_TASK)
     ema = ExponentialMovingAverage(model.parameters(), decay=config.EMA_RATE)
         
     loss_function = torch.nn.BCEWithLogitsLoss()
@@ -207,6 +172,14 @@ def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
             optimizer, milestones=config.DOWNSTEPS, gamma=0.3
         )
 
+    # Wrap all objects with accelerate's prepare method
+    model, optimizer, train_loader, valid_loader, scheduler = accelerator.prepare(
+        model, optimizer, train_loader, valid_loader, scheduler
+    )
+    
+    # move EMA to accelerator device
+    ema.to(device)
+
     # Training loop
     best_metric = -1
     best_metric_epoch = -1
@@ -215,12 +188,10 @@ def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
     counter = 0
 
     for epoch in range(epochs):
-        # if counter > patience and config.SUBMISSION == False:
-        #     logging.info(f"Model not improving for {patience} epochs")
-        #     break
-
-        logging.info("-" * 10)
-        logging.info("epoch {}/{}".format(epoch + 1, epochs))
+        # logging은 main process에서만 수행
+        if accelerator.is_main_process:
+            logging.info("-" * 10)
+            logging.info("epoch {}/{}".format(epoch + 1, epochs))
 
         # Train
         model.train()
@@ -232,9 +203,7 @@ def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
             step += 1
             inputs, masks, labels = batch_data["image"], batch_data["mask"], batch_data["label"]
             
-            inputs = inputs.to(device)
-            masks = masks.to(device)
-            labels = labels.float().to(device)
+            labels = labels.float() 
             
             benigns = torch.where(labels.squeeze() == 0)
             malignants = torch.where(labels.squeeze() == 1)
@@ -248,26 +217,23 @@ def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
             
 
             optimizer.zero_grad()
-            with torch.amp.autocast(device_type=device.type):
-                features = model.extract_feature(inputs)
-                cls_outputs, seg_outputs = model(features_main=features)
+            features = model.extract_feature(inputs)
+            cls_outputs, seg_outputs = model(features_main=features)
 
-                loss_cls = loss_function(cls_outputs.squeeze(), labels.squeeze())
-                loss_seg = dice_loss(seg_outputs, masks)
-                loss = loss_cls + config.AUX_LOSS_WEIGHT * loss_seg
+            loss_cls = loss_function(cls_outputs.squeeze(), labels.squeeze())
+            loss_seg = dice_loss(seg_outputs, masks)
+            loss = loss_cls + config.AUX_LOSS_WEIGHT * loss_seg
             
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            accelerator.backward(loss)
+            optimizer.step()
             
-            # loss.backward()
-            # optimizer.step()
+            # EMA Update
             ema.update()
             
             epoch_cls_loss += loss_cls.item()
             epoch_seg_loss += loss_seg.item()
             
-            if step % 100 == 0:
+            if step % 100 == 0 and accelerator.is_main_process:
                 epoch_len = len(new_train_df) // train_loader.batch_size
                 logging.info(
                     "{}/{}, train_cls_loss: {:.4f}, train_seg_loss: {:.4f}".format(step, epoch_len, loss_cls.item(), loss_seg.item())
@@ -276,20 +242,24 @@ def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
         epoch_cls_loss /= step
         epoch_seg_loss /= step
 
-        logging.info(
-            "epoch {} average train cls loss: {:.4f}, train seg loss: {:.4f}".format(epoch + 1, epoch_cls_loss, epoch_seg_loss)
-        )
+        if accelerator.is_main_process:
+            logging.info(
+                "epoch {} average train cls loss: {:.4f}, train seg loss: {:.4f}".format(epoch + 1, epoch_cls_loss, epoch_seg_loss)
+            )
         
         with ema.average_parameters():
             
             if config.SUBMISSION == True:
-                # Save model for submission every 5 epochs
                 if (epoch + 1) % 5 == 0:
-                    torch.save(
-                        model.state_dict(),
-                        exp_save_root / f"multitask_model_epoch_{epoch + 1}.pth",
-                    )
-                    logging.info(f"Saved model at epoch {epoch + 1} for submission.")
+                    accelerator.wait_for_everyone() 
+                    
+                    if accelerator.is_main_process:
+                        unwrapped_model = accelerator.unwrap_model(model)
+                        torch.save(
+                            unwrapped_model.state_dict(),
+                            exp_save_root / f"multitask_model_epoch_{epoch + 1}.pth",
+                        )
+                        logging.info(f"Saved model at epoch {epoch + 1} for submission.")
             else:
                 # Validate
                 model.eval()
@@ -297,96 +267,80 @@ def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
                 epoch_seg_loss = 0
                 step = 0
 
+                val_preds_list = []
+                val_targets_list = []
+
                 with torch.no_grad():
-                    y_pred = torch.tensor([], dtype=torch.float32, device=device)
-                    y = torch.tensor([], dtype=torch.float32, device=device)
-                    
                     for val_data in valid_loader:
                         step += 1
                         val_images, val_masks, val_labels = (
-                            val_data["image"].to(device),
-                            val_data["mask"].to(device),
-                            val_data["label"].to(device),
+                            val_data["image"], 
+                            val_data["mask"], 
+                            val_data["label"],
                         )
-                        val_images = val_images.to(device)
-                        val_labels = val_labels.float().to(device)
-                        val_masks = val_masks.to(device)
+                        val_labels = val_labels.float()
                         
                         val_images = torch.nn.functional.interpolate(val_images, size=(64, int(64*config.UP_SCALE), int(64*config.UP_SCALE)))
                         
-                        with torch.amp.autocast(device_type=device.type):
-                            features = model.extract_feature(val_images)
-                            cls_outputs, seg_outputs = model(features_main=features)
-                            
-                            loss_cls = loss_function(cls_outputs.squeeze(), val_labels.squeeze())
-                            loss_seg = dice_loss(seg_outputs, val_masks)
+                        features = model.extract_feature(val_images)
+                        cls_outputs, seg_outputs = model(features_main=features)
+                        
+                        loss_cls = loss_function(cls_outputs.squeeze(), val_labels.squeeze())
+                        loss_seg = dice_loss(seg_outputs, val_masks)
                         
                         epoch_cls_loss += loss_cls.item()
                         epoch_seg_loss += loss_seg.item()
                         
-                        y_pred = torch.cat([y_pred, cls_outputs], dim=0)
-                        y = torch.cat([y, val_labels], dim=0)
+                        gathered_preds, gathered_labels = accelerator.gather_for_metrics((cls_outputs, val_labels))
+                        
+                        val_preds_list.append(gathered_preds.detach().cpu())
+                        val_targets_list.append(gathered_labels.detach().cpu())
 
                     epoch_cls_loss /= step
                     epoch_seg_loss /= step
                     
-                    logging.info(
-                        "epoch {} average valid cls loss: {:.4f}, valid seg loss: {:.4f}".format(epoch + 1, epoch_cls_loss, epoch_seg_loss)
-                    )
-
-                    y_pred = torch.sigmoid(y_pred.reshape(-1)).data.cpu().numpy().reshape(-1)
-                    y = y.data.cpu().numpy().reshape(-1)
-
-                    fpr, tpr, _ = metrics.roc_curve(y, y_pred)
-                    auc_metric = metrics.auc(fpr, tpr)
-
-                    if auc_metric > best_metric:
-                        counter = 0
-                        best_metric = auc_metric
-                        best_metric_epoch = epoch + 1
-
-                        torch.save(
-                            model.state_dict(),
-                            exp_save_root / "best_multitask_model.pth",
+                    if accelerator.is_main_process:
+                        logging.info(
+                            "epoch {} average valid cls loss: {:.4f}, valid seg loss: {:.4f}".format(epoch + 1, epoch_cls_loss, epoch_seg_loss)
                         )
-                        
-                        metadata = {
-                            "train_csv": train_csv_path,
-                            "valid_csv": valid_csv_path,
-                            "config": config,
-                            "best_auc": best_metric,
-                            "epoch": best_metric_epoch,
-                            "data_split_info": {
-                                "original_train_samples": len(train_df),
-                                "original_valid_samples": len(valid_df),
-                                "new_train_samples": len(new_train_df),
-                                "new_valid_samples": len(new_valid_df),
-                                "random_seed": config.SEED
-                            }
-                        }
-                        np.save(
-                            exp_save_root / "config.npy",
-                            metadata,
-                        )
-                        
-                        logging.info("saved new best multitask model")
 
-                    logging.info(
-                        "current epoch: {} current AUC: {:.4f} best AUC: {:.4f} at epoch {}".format(
-                            epoch + 1, auc_metric, best_metric, best_metric_epoch
-                        )
-                    )
+                    y_pred_all = torch.cat(val_preds_list)
+                    y_all = torch.cat(val_targets_list)
+                    
+                    y_pred_np = torch.sigmoid(y_pred_all.reshape(-1)).numpy().reshape(-1)
+                    y_np = y_all.numpy().reshape(-1)
 
-                
+                    if accelerator.is_main_process:
+                        fpr, tpr, _ = metrics.roc_curve(y_np, y_pred_np)
+                        auc_metric = metrics.auc(fpr, tpr)
+
+                        if auc_metric > best_metric:
+                            counter = 0
+                            best_metric = auc_metric
+                            best_metric_epoch = epoch + 1
+
+                            unwrapped_model = accelerator.unwrap_model(model)
+                            torch.save(
+                                unwrapped_model.state_dict(),
+                                exp_save_root / "best_multitask_model.pth",
+                            )
+                            logging.info("saved new best multitask model")
+
+                        logging.info(
+                            "current epoch: {} current AUC: {:.4f} best AUC: {:.4f} at epoch {}".format(
+                                epoch + 1, auc_metric, best_metric, best_metric_epoch
+                            )
+                        )
         
         counter += 1
         scheduler.step()
 
-    logging.info(
-        "Multi-task training completed, best_metric: {:.4f} at epoch: {}".format(
-            best_metric, best_metric_epoch
+    if accelerator.is_main_process:
+        logging.info(
+            "Multi-task training completed, best_metric: {:.4f} at epoch: {}".format(
+                best_metric, best_metric_epoch
+            )
         )
-    )
     
     return exp_save_root / "best_multitask_model.pth"
 
@@ -401,7 +355,7 @@ def main():
         config.CSV_DIR_VALID,
         exp_save_root
     )
-   
+    
     logging.info(f"All results saved in: {exp_save_root}")
 
 if __name__ == "__main__":
