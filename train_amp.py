@@ -45,9 +45,15 @@ class DiceLoss(nn.Module):
         self.smooth = smooth
     
     def forward(self, logits, targets):
-        probs = torch.sigmoid(logits)
-        intersection = (probs * targets).sum()
-        dice = (2. * intersection + self.smooth) / (probs.sum() + targets.sum() + self.smooth)
+        # Keep the reduction out of fp16. Under autocast the logits come back as
+        # float16, and probs.sum() over B*64^3 voxels (~4.2e6) overflows the fp16
+        # range (max 65504) to inf: dice collapses to 0, the loss sticks at exactly
+        # 1.0 and the segmentation head receives zero gradient.
+        with torch.autocast(device_type=logits.device.type, enabled=False):
+            probs = torch.sigmoid(logits.float())
+            targets = targets.float()
+            intersection = (probs * targets).sum()
+            dice = (2. * intersection + self.smooth) / (probs.sum() + targets.sum() + self.smooth)
         return 1 - dice
 
 def train_multitask(train_csv_path, valid_csv_path, exp_save_root):
